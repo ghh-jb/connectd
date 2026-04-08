@@ -1,0 +1,12 @@
+[Unit]
+Description=Compatibility shim for old laptops to make audio input configure automatically across reboots.
+After=multi-user.target
+
+[Service]
+Type=forking
+ExecStart=/usr/local/bin/connectd
+Restart=on-failure
+User=root
+
+[Install]
+WantedBy=multi-user.target
