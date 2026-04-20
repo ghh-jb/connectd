@@ -4,7 +4,7 @@ After=multi-user.target
 
 [Service]
 Type=forking
-ExecStart=/usr/local/bin/connectd
+ExecStart=/usr/bin/connectd
 Restart=on-failure
 User=root
 
